@@ -30,7 +30,7 @@ class DFT : GeneN!DFT {
 		real[movec][movec] score	= [ [ 3 /* C/opp.C -> R */, 0 /* C/opp.D -> S */ ],
 									    [ 5 /* D/opp.C -> T */, 1 /* D/opp.D -> P */ ] ]; /* Payoff matrix */
 		uint eval_rounds			= 150;	/* Number of rounds to simulate for fitness evaluation, set to zero or negative for infinite horizon */
-		real eval_alpha				= 0.8;	/* Geometric weighting parameter for fitness evaluation, set to one for unweighted */
+		real eval_alpha				= 1;	/* Geometric weighting parameter for fitness evaluation, set to one for unweighted */
 	}
 
 	struct State {
@@ -348,7 +348,7 @@ private:
 			sm2 = this.play_next(om);
 			om2 = other.play_next(sm);
 			alphan *= alpha;
-			ret[sm = sm2][om = om2] += alphan;
+			ret[sm = sm2][om = om2] += alphan; /* Geometric weighting by alpha^n */
 		}
 
 		foreach (m; Moves) {
@@ -363,7 +363,7 @@ private:
 	 * Run the cross-product chain until it reaches a cycle, then average over the cycle only.
 	 * This unfortunately relies on the fact that 1^n=1 and is completely inapplicable to nondeterministic systems.
 	 */
-	real[movec][movec] simulate_infinite(DFT other)
+	real[movec][movec] simulate_infinite(bool minimize = false)(DFT other)
 	out(ret) {
 		real total = 0;
 		foreach (d1; ret) {
@@ -373,13 +373,83 @@ private:
 		}
 		assert(approxEqual(total, 1, 1e-10, 1e-10)); //TODO: find sum(real[][])
 	} body {
+		struct Count { /* To force the associative array to behave properly */
+			uint[movec][movec] c;
+		}
+
 		real[movec][movec] ret = 0;
+		Count[size_t] count;	/* (3)+2-dimensional array: Markov state = (state of 1 x state of 2 x last move of 1 x last move of 2)
+								 * -> aggregate counts of move-pairs of the simulation up to this Markov state.
+								 * Associative array used as this is really sparse.
+								 * As a side bonus, inExpression is a test for past visit */
+		size_t mid, mid2;		/* Indices into the Markov chain */
+		Move sm, om, sm2, om2;
 
-		states_minimal; /* Ensure both automata have been state-minimized */
-		other.states_minimal;
+		static if (minimize) {
+			states_minimal; /* Ensure both automata have been state-minimized */
+			other.states_minimal;
 
-		//TODO
+			const size_t n1_states = st_minimal.length;
+			const size_t n2_states = other.st_minimal.length;
+		} else {
+			const size_t n1_states = states.length;
+			const size_t n2_states = other.states.length;
+		}
+		const size_t m_states = n1_states * n2_states * movec * movec; /* Implementation choice: Markov chain index linearized to avoid double indirection */
 
+		size_t index(size_t q1, size_t q2, Move m1, Move m2) { /* Indexing function for state x state x move x move */
+			return ((q1 * n2_states + q2) * movec + m1) * movec + m2;
+		}
+
+		static if (minimize) {
+			sm = play_mininit();
+			om = other.play_mininit();
+		} else {
+			sm = play_init();
+			om = other.play_init();
+		}
+		mid = index(cur_state, other.cur_state, sm, om);
+		count[mid] = Count();
+		count[mid].c[sm][om] = 1; /* At this Markov state, the only move-pair ever played is sm-om */
+
+		while (1) {
+			static if (minimize) {
+				sm2 = play_minnext(om);
+				om2 = play_minnext(sm);
+			} else {
+				sm2 = play_next(om);
+				om2 = play_next(sm);
+			}
+			mid2 = index(cur_state, other.cur_state, sm2, om2);
+			if (mid2 in count) { /* The Markov chain has closed the cycle */
+				break;
+			}
+
+			count[mid2] = count[mid]; /* Copy over the aggregate counts */
+			count[mid2].c[sm2][om2]++; /* And increment the currently played pair */
+
+			sm = sm2;
+			om = om2;
+			mid = mid2;
+		}
+
+		/* At this point mid is the last state in the cycle, which closes to mid2 */
+		foreach (m1; Moves) {
+			foreach (m2; Moves) {
+				ret[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the aggregate moves within the cycle only */
+			}
+		}
+		ret[sm2][om2]++; /* Add back the cycle-closing move pair */
+
+		real total = 0;
+		foreach (r1; ret) {
+			foreach (r2; r1) {
+				total += r2;
+			}
+		}
+		foreach (ref r1; ret) {
+			r1[] /= total; /* Normalize total counts */
+		}
 		return ret;
 	}
 
@@ -417,7 +487,10 @@ private:
 	 * Maintains a mapping from representation state-number to canonicalized state-number,
 	 * then feeds all states through a queue to traverse all reachable states.
 	 */
-	void canonicalizeStates() {
+	void canonicalizeStates()
+	out {
+		assert(st_canonical.length > 0 && st_canonical.length <= states.length);
+	} body {
 		size_t[] mapping; /* Mapping of representation state-number to the canonicalized state-number */
 
 		mapping.length = states.length;
@@ -461,7 +534,10 @@ private:
 	 * and recursive_mark does work proportional to number of dependency marks followed.
 	 *
 	 * TODO: figure out if Hopcroft's algorithm works here. */
-	void minimizeStates() {
+	void minimizeStates()
+	out {
+		assert(st_minimal.length > 0 && st_minimal.length <= st_canonical.length && st_minimal.length <= states.length);
+	} body {
 		bool[] marked; /* Implementation choice: square arrays for state x state linearized here, to avoid double indirection.  */
 		size_t[][] backmark; /* backmark[i,j] = array of state pair indices depending on (i,j) */
 		size_t[] mapping; /* Eventually used to canonicalize the minimized automaton */
@@ -529,8 +605,10 @@ private:
 		backmark.length = 0; /* Allow GC to collect this if needed */
 
 		/* Use the same algorithm as canonicalizing, except when mapping a new state, map all states indistinguishable to it as well */
-		void mapIndistinguishable(size_t i) {
+		void mapIndistinguishable(size_t i)
+		in {
 			assert(mapping[i] == -1);
+		} body {
 			mapping[i] = st_minimal.length;
 			foreach (j; 0 .. i) {
 				if (!marked[index(j,i)]) {
