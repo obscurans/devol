@@ -233,7 +233,7 @@ class DFT : GeneN!DFT {
 				}
 			}
 		}
-		ret[] /= ret.length - 1; /* Normalize to per-round scores */
+		ret[] /= ret.length - 1; /* Normalize to per-round, per-match scores */
 
 		foreach (i; 0 .. ret.length) {
 			input[i].cachefit = ret[i]; /* Store fitness results for participating automata */
@@ -332,7 +332,7 @@ private:
 
 		foreach (m; Moves) {
 			static if (weighted) {
-				ret[m][] *= factor; /* Normalize total counts */
+				ret[m][] *= factor; /* Normalize total weighted counts */
 			} else {
 				ret[m][] /= rounds; /* Normalize total counts */
 			}
@@ -361,7 +361,7 @@ private:
 				total += d2;
 			}
 		}
-		assert(approxEqual(total, 1, 1e-10, 1e-10)); //TODO: find sum(real[][])
+		assert(approxEqual(total, 1, 1e-10, 1e-10), "simulate_infinite returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
 	} body {
 		struct Count { /* To force the associative array to behave properly */
 			static if (weighted) {
@@ -466,12 +466,16 @@ private:
 				}
 			}
 
-			foreach (m1; Moves) {
-				foreach (m2; Moves) {
-					/* The normalizing factor (for the complete geometric series) is 1-alpha.
-					 * The remainder from 1 after normalization is the scaling factor for the count from the cycle.
-					 * This completes the normalized count. */
-					ret[m1][m2] = (1 - alpha) * ret[m1][m2] + (1 - total * (1 - alpha)) / cyctot * temp[m1][m2];
+			if (cyctot > 0) { /* If alpha = 0 corner case, only the very first move matters */
+				const real factor = (1 - total * (1 - alpha)) / cyctot;
+				assert(factor >= 1);
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						/* The normalizing factor (for the complete geometric series) is 1-alpha.
+						 * The remainder from 1 after normalization is the contribution to be made from the cycle.
+						 * The cycle counts are thus scaled up to complete the normalized counts */
+						ret[m1][m2] = (1 - alpha) * ret[m1][m2] + factor * temp[m1][m2];
+					}
 				}
 			}
 		} else {
