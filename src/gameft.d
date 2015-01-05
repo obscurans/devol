@@ -203,17 +203,17 @@ class DFT : GeneN!DFT {
 
 		foreach (i; 0 .. ret.length - 1) {
 			foreach (j; i + 1 .. ret.length) { /* Symmetric game, so run upper triangle for round-robin */
-				if (eval_alpha == 1) { /* If evaluation is unweighted */
-					if (eval_rounds > 0 && eval_rounds < 0xFFFF) { /* If evaluation rounds is set and not insane */
-						match = input[i].simulate(input[j], eval_rounds); /* Dispatch the correct simulation function, could be made static */
+				if (eval_rounds > 0 && eval_rounds < 0xFFFF) { /* If evaluation rounds is set and not insane */
+					if (eval_alpha == 1) { /* If evaluation is unweighted */
+						match = input[i].simulate!false(input[j], eval_rounds); /* Dispatch the correct simulation function, could be made static */
 					} else {
-						match = input[i].simulate_infinite(input[j]);
+						match = input[i].simulate!true(input[j], eval_rounds, eval_alpha);
 					}
 				} else {
-					if (eval_rounds > 0 && eval_rounds < 0xFFFF) {
-						match = input[i].simulate_weighted(input[j], eval_alpha, eval_rounds);
+					if (eval_alpha == 1) {
+						match = input[i].simulate_infinite!false(input[j]);
 					} else {
-						match = input[i].simulate_infinite_weighted(input[j], eval_alpha);
+						match = input[i].simulate_infinite!true(input[j], eval_alpha);
 					}
 				}
 				foreach (m1; Moves) {
@@ -290,10 +290,16 @@ private:
 		return st_minimal[cur].act[input];
 	}
 
-	/* Direct simulation of the game, up to a specified number of rounds. Returns normalized counts of move-pairs (results).
-	 * Uses real instead of int for compatibility with everything else. */
-	real[movec][movec] simulate(DFT other, uint rounds)
-	out(ret) {
+	/* Direct simulation of the game, up to a specified number of rounds. Returns distribution over move-pairs (results).
+	 * Uses real instead of int for compatibility with everything else.
+	 *
+	 * Compile-time overload (if weighted): direct truncated-geometric(alpha)-weighted simulation of the game */
+	real[movec][movec] simulate(bool weighted = false)(DFT other, uint rounds, real alpha = 1)
+	in {
+		static if (weighted) {
+			assert(alpha >= 0 && alpha < 1, "For simulate!weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
+		}
+	} out(ret) {
 		real total = 0;
 		foreach (d1; ret) {
 			foreach (d2; d1) {
@@ -302,6 +308,10 @@ private:
 		}
 		assert(approxEqual(total, 1, 1e-10, 1e-10), "simulate returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
 	} body {
+		static if (weighted) {
+			const real factor = (1 - alpha) / (1 - alpha ^^ rounds); /* Total weighting is sum(n=0..rounds-1)alpha^n = (1-alpha^n)/(1-alpha) */
+			real alphan = 1; /* Stores alpha^n by successive multiplication */
+		}
 		real[movec][movec] ret = 0;
 		Move sm, om, sm2, om2;
 
@@ -312,47 +322,20 @@ private:
 		foreach (i; 1 .. rounds) {
 			sm2 = this.play_next(om);
 			om2 = other.play_next(sm);
-			ret[sm = sm2][om = om2]++;
-		}
-
-		foreach (m; Moves) {
-			ret[m][] /= rounds; /* Normalize total counts */
-		}
-		return ret;
-	}
-
-	/* Direct truncated-geometric(alpha)-weighted simulation of the game, up to a specified number of rounds.
-	 * Returns distribution over move-pairs (results) */
-	real[movec][movec] simulate_weighted(DFT other, real alpha, uint rounds)
-	in {
-		assert(alpha >= 0 && alpha < 1, "For simulate_weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
-	} out(ret) {
-		real total = 0;
-		foreach (d1; ret) {
-			foreach (d2; d1) {
-				total += d2;
+			static if (weighted) {
+				alphan *= alpha;
+				ret[sm = sm2][om = om2] += alphan; /* Geometric weighting by alpha^n */
+			} else {
+				ret[sm = sm2][om = om2]++;
 			}
 		}
-		assert(approxEqual(total, 1, 1e-10, 1e-10)); //TODO: find sum(real[][])
-	} body {
-		const real factor = (1 - alpha) / (1 - alpha ^^ rounds); /* Total weighting is sum(n=0..rounds-1)alpha^n = (1-alpha^n)/(1-alpha) */
-		real[movec][movec] ret = 0;
-		real alphan = 1; /* Stores alpha^n by successive multiplication */
-		Move sm, om, sm2, om2;
-
-		sm = this.play_init();
-		om = other.play_init();
-		ret[sm][om]++;
-
-		foreach (i; 1 .. rounds) {
-			sm2 = this.play_next(om);
-			om2 = other.play_next(sm);
-			alphan *= alpha;
-			ret[sm = sm2][om = om2] += alphan; /* Geometric weighting by alpha^n */
-		}
 
 		foreach (m; Moves) {
-			ret[m][] *= factor; /* Normalize total counts */
+			static if (weighted) {
+				ret[m][] *= factor; /* Normalize total counts */
+			} else {
+				ret[m][] /= rounds; /* Normalize total counts */
+			}
 		}
 		return ret;
 	}
@@ -362,9 +345,16 @@ private:
 	 * Using the property that this is a deterministic finite Markov chain, the formulation can be massively simplified.
 	 * Run the cross-product chain until it reaches a cycle, then average over the cycle only.
 	 * This unfortunately relies on the fact that 1^n=1 and is completely inapplicable to nondeterministic systems.
+	 *
+	 * Compile-time overload (if weighted): returns the geometric(alpha)-weighted infinite-horizon distribution over move-pairs (results).
+ 	 * Run the cross-product chain until it closes a cycle, then calculate the tail weighting over the cycle to complete.
 	 */
-	real[movec][movec] simulate_infinite(bool minimize = false)(DFT other)
-	out(ret) {
+	real[movec][movec] simulate_infinite(bool weighted = false, bool minimize = false)(DFT other, real alpha = 1)
+	in {
+		static if (weighted) {
+			assert(alpha >= 0 && alpha < 1, "For simulate_infinite!weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
+		}
+	} out(ret) {
 		real total = 0;
 		foreach (d1; ret) {
 			foreach (d2; d1) {
@@ -374,16 +364,23 @@ private:
 		assert(approxEqual(total, 1, 1e-10, 1e-10)); //TODO: find sum(real[][])
 	} body {
 		struct Count { /* To force the associative array to behave properly */
-			uint[movec][movec] c;
+			static if (weighted) {
+				real[movec][movec] c;
+			} else {
+				uint[movec][movec] c;
+			}
 		}
 
 		real[movec][movec] ret = 0;
 		Count[size_t] count;	/* (3)+2-dimensional array: Markov state = (state of 1 x state of 2 x last move of 1 x last move of 2)
-								 * -> aggregate counts of move-pairs of the simulation up to this Markov state.
+								 * -> aggregate (weighted) counts of move-pairs of the simulation up to this Markov state.
 								 * Associative array used as this is really sparse.
 								 * As a side bonus, inExpression is a test for past visit */
 		size_t mid, mid2;		/* Indices into the Markov chain */
 		Move sm, om, sm2, om2;
+		static if (weighted) {
+			real alphan = 1;	/* Stores alpha^n by successive multiplication */
+		}
 
 		static if (minimize) {
 			states_minimal; /* Ensure both automata have been state-minimized */
@@ -409,7 +406,13 @@ private:
 			om = other.play_init();
 		}
 		mid = index(cur_state, other.cur_state, sm, om);
+
 		count[mid] = Count();
+		static if (weighted) {
+			foreach (ref c; count[mid].c) {
+				c[] = 0; /* Initialize for real values */
+			}
+		}
 		count[mid].c[sm][om] = 1; /* At this Markov state, the only move-pair ever played is sm-om */
 
 		while (1) {
@@ -426,7 +429,12 @@ private:
 			}
 
 			count[mid2] = count[mid]; /* Copy over the aggregate counts */
-			count[mid2].c[sm2][om2]++; /* And increment the currently played pair */
+			static if (weighted) {
+				alphan *= alpha;
+				count[mid2].c[sm2][om2] += alphan; /* Weighting by alpha^n */
+			} else {
+				count[mid2].c[sm2][om2]++; /* And increment the currently played pair */
+			}
 
 			sm = sm2;
 			om = om2;
@@ -434,49 +442,55 @@ private:
 		}
 
 		/* At this point mid is the last state in the cycle, which closes to mid2 */
-		foreach (m1; Moves) {
-			foreach (m2; Moves) {
-				ret[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the aggregate moves within the cycle only */
+		static if (weighted) {
+			real[movec][movec] temp;
+			ret = count[mid2].c; /* Take the accumulated weighted moves before the cycle */
+			foreach (m1; Moves) {
+				foreach (m2; Moves) {
+					temp[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the weighted moves within the cycle only */
+				}
+			}
+			alphan *= alpha;
+			temp[sm2][om2] += alphan; /* Add back the weighted cycle-closing move pair */
+
+			real cyctot = 0;
+			foreach (t1; temp) {
+				foreach (t2; t1) {
+					cyctot += t2; /* Calculate the total weight of one cycle */
+				}
+			}
+			real total = 0;
+			foreach (r1; ret) {
+				foreach (r2; r1) {
+					total += r2; /* Calculate accumulated count before the cycle */
+				}
+			}
+
+			foreach (m1; Moves) {
+				foreach (m2; Moves) {
+					/* The normalizing factor (for the complete geometric series) is 1-alpha.
+					 * The remainder from 1 after normalization is the scaling factor for the count from the cycle.
+					 * This completes the normalized count. */
+					ret[m1][m2] = (1 - alpha) * ret[m1][m2] + (1 - total * (1 - alpha)) / cyctot * temp[m1][m2];
+				}
+			}
+		} else {
+			foreach (m1; Moves) {
+				foreach (m2; Moves) {
+					ret[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the aggregate moves within the cycle only */
+				}
+			}
+			ret[sm2][om2]++; /* Add back the cycle-closing move pair */
+			real total = 0;
+			foreach (r1; ret) {
+				foreach (r2; r1) {
+					total += r2;
+				}
+			}
+			foreach (ref r1; ret) {
+				r1[] /= total; /* Normalize total counts */
 			}
 		}
-		ret[sm2][om2]++; /* Add back the cycle-closing move pair */
-
-		real total = 0;
-		foreach (r1; ret) {
-			foreach (r2; r1) {
-				total += r2;
-			}
-		}
-		foreach (ref r1; ret) {
-			r1[] /= total; /* Normalize total counts */
-		}
-		return ret;
-	}
-
-	/* Simulates the game and returns the infinite-horizon geometric(alpha)-weighted distribution over move-pairs (results).
-	 *
-	 * As with simulate_infinite above, heavily using the property that this is a deterministic finite Markov chain.
-	 * Run the cross-product chain until it closes a cycle, then calculate the tail weighting over the cycle to complete.
-	 * Method completely inapplicable to nondeterministic systems.
-	 */
-	real[movec][movec] simulate_infinite_weighted(DFT other, real alpha)
-	in {
-		assert(alpha >= 0 && alpha < 1, "For simulate_infinite_weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
-	} out(ret) {
-		real total = 0;
-		foreach (d1; ret) {
-			foreach (d2; d1) {
-				total += d2;
-			}
-		}
-		assert(approxEqual(total, 1, 1e-10, 1e-10)); //TODO: find sum(real[][])
-	} body {
-		real[movec][movec] ret = 0;
-
-		states_minimal; /* Ensure both automata have been state-minimized */
-		other.states_minimal;
-
-		//TODO
 
 		return ret;
 	}
