@@ -1,3 +1,5 @@
+/** Copyright (C) 2015 Jeffrey Tsang. All rights reserved. See /LICENCE.md */
+
 import std.algorithm, std.conv, std.math, std.stdio;
 import devol;
 /*extern (C) { //currently LAPACK not used
@@ -376,6 +378,8 @@ private:
 		states_minimal; /* Ensure both automata have been state-minimized */
 		other.states_minimal;
 
+		//TODO
+
 		return ret;
 	}
 
@@ -401,6 +405,8 @@ private:
 
 		states_minimal; /* Ensure both automata have been state-minimized */
 		other.states_minimal;
+
+		//TODO
 
 		return ret;
 	}

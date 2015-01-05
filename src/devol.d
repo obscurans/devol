@@ -1,3 +1,5 @@
+/** Copyright (C) 2015 Jeffrey Tsang. All rights reserved. See /LICENCE.md */
+
 import std.algorithm, std.conv, std.exception, std.functional, std.stdio;
 public import std.random;
 
