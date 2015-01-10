@@ -75,13 +75,7 @@ class GeneN(G) : Gene!G {
 	abstract override @property G dup() const; /* Duplicated abstract functions for reference */
 	abstract override void mutate(ref Random);
 	abstract override G[2] crossover(const G, ref Random) const;
-
-	abstract real[] tournament(G[] input)
-	out(ret) {
-		assert(ret.length == input.length, to!string(typeid(G)) ~ ":tournament must return list of fitness values for each input gene");
-	} body {
-		assert(0, to!string(typeid(GeneN)) ~ ":tournament base class method cannot be used");
-	}
+	/* Required static method: real[] tournament(G[]) */
 
 	final override @property real fitness() {
 		return cachefit;
@@ -91,8 +85,10 @@ class GeneN(G) : Gene!G {
 /* Class for running unstructured evolution,
  * that is, in fitness evaluation (if applicable), mating and replacement, every gene can interact with every other */
 class UnstructuredEvolution(G)
-/* The gene type must inherit either GeneL (local) or GeneN (nonlocal) */
-if (is(G : GeneL!G) || is(G : GeneN!G)) {
+/* The gene type must inherit either GeneL (local) ... */
+if (is(G : GeneL!G) ||
+/* or GeneN (nonlocal), but then it must implement real[] G.tournament(G[]) */
+(is(G : GeneN!G) && is(typeof(G.tournament([new G])) == real[]))) {
 	struct Parameters {
 		size_t s_population			= 36;		/* Population size */
 		size_t s_elite				= 24;		/* Size of the elite (fitness rank < elite --> automatically copied over per generation) */
@@ -140,7 +136,7 @@ if (is(G : GeneL!G) || is(G : GeneN!G)) {
 		}
 		static if (is(G : GeneN!G)) {
 			if (runPosttournament) {
-				population[0].tournament(population);
+				G.tournament(population);
 			}
 		}
 		generation = 0;
@@ -176,7 +172,7 @@ if (is(G : GeneL!G) || is(G : GeneN!G)) {
 
 			static if (is(G : GeneN!G)) {
 				if (runPosttournament) {
-					population[0].tournament(population);
+					G.tournament(population);
 				}
 			}
 			generation++;

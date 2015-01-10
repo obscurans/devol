@@ -188,12 +188,27 @@ class DFT : GeneN!DFT {
 		return ret;
 	}
 
-	/* Round-robin tournament on the input (ignores this). May eventually be split statically. */
-	override real[] tournament(DFT[] input) {
+	/* Round-robin tournament on the input.
+	 * Compile time option: if statistics, instead of the fitness vector over the input, returns input-population tournament average counts of move-pairs. */
+	static real[] tournament(bool statistics = false)(DFT[] input)
+	out(ret) {
+		static if (statistics) {
+			real total = 0;
+			foreach (r; ret) {
+				total += r;
+			}
+			assert(approxEqual(total, 1, 1e-10, 1e-10), "tournament!statistics returned vector summing to " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[])
+
+			foreach (m1; Moves) {
+				foreach (m2; Moves) {
+					assert(approxEqual(ret[m1 * movec + m2], ret[m2 * movec + m1], 1e-10, 1e-10), "tournament!statistics returned vector with entries (" ~ to!string(m1) ~ "," ~ to!string(m2) ~ ") and (" ~ to!string(m2) ~ "," ~ to!string(m1) ~ ") not equal when symmetry expected");
+				}
+			}
+		}
+	} body {
 		real[] ret;
 		real[movec][movec] match;
 		real[movec][movec][] results;
-		ret.length = input.length;
 		results.length = input.length;
 		foreach (ref r1; results) { /* Initialize results array */
 			foreach (ref r2; r1) {
@@ -201,8 +216,8 @@ class DFT : GeneN!DFT {
 			}
 		}
 
-		foreach (i; 0 .. ret.length - 1) {
-			foreach (j; i + 1 .. ret.length) { /* Symmetric game, so run upper triangle for round-robin */
+		foreach (i; 0 .. input.length - 1) {
+			foreach (j; i + 1 .. input.length) { /* Symmetric game, so run upper triangle for round-robin */
 				if (eval_rounds > 0 && eval_rounds < 0xFFFF) { /* If evaluation rounds is set and not insane */
 					if (eval_alpha == 1) { /* If evaluation is unweighted */
 						match = input[i].simulate!false(input[j], eval_rounds); /* Dispatch the correct simulation function, could be made static */
@@ -225,20 +240,38 @@ class DFT : GeneN!DFT {
 			}
 		}
 
-		ret[] = 0;
-		foreach (i; 0 .. ret.length) {
-			foreach (m1; Moves) {
-				foreach (m2; Moves) {
-					ret[i] += results[i][m1][m2] * score[m1][m2]; /* Total score is dot product of result-type count and score matrix */
+		static if (statistics) {
+			ret.length = movec * movec; /* For signature compatibility, the move-pair matrix is flattened; it should be symmetric anyway */
+			ret[] = 0;
+
+			foreach (i; 0 .. input.length) {
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						ret[m1 * movec + m2] += results[i][m1][m2];
+					}
 				}
 			}
-		}
-		ret[] /= ret.length - 1; /* Normalize to per-round, per-match scores */
+			ret[] /= input.length * (input.length - 1); /* Normalize to input-population average: nC2 matches, then results are double counted per match */
 
-		foreach (i; 0 .. ret.length) {
-			input[i].cachefit = ret[i]; /* Store fitness results for participating automata */
+			return ret;
+		} else {
+			ret.length = input.length;
+			ret[] = 0;
+
+			foreach (i; 0 .. input.length) {
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						ret[i] += results[i][m1][m2] * score[m1][m2]; /* Total score is dot product of result-type count and score matrix */
+					}
+				}
+			}
+			ret[] /= input.length - 1; /* Normalize to per-round, per-match scores */
+
+			foreach (i; 0 .. input.length) {
+				input[i].cachefit = ret[i]; /* Store fitness results for participating automata */
+			}
+			return ret;
 		}
-		return ret;
 	}
 
 	/* Return read-only view of the canonicalized automaton */
