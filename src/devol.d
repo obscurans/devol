@@ -118,6 +118,7 @@ if (is(G : GeneL!G) || is(G : GeneN!G)) {
 	Parameters params;	/* Local parameter values */
 	alias params this;	/* Causes parameter names to be scoped through the class (so UnstructuredEvolution!G x.s_population is valid) */
 	G[] population;		/* Current population */
+	uint generation;	/* Current generation number */
 	Random rng;			/* Random number generator used for this run */
 
 	/* Generic constructor, auto-initializes the population */
@@ -142,39 +143,43 @@ if (is(G : GeneL!G) || is(G : GeneN!G)) {
 				population[0].tournament(population);
 			}
 		}
+		generation = 0;
 	}
 
-	/* Run one generation */
-	void generation()
+	/* Run one or more generations */
+	void runGeneration(uint count = 1)
 	in {
 		assert(params.s_population == population.length, "Mismatch between population size (" ~ to!string(params.s_population) ~ ") and actual population (" ~ to!string(population.length) ~ ")");
 		assert(params.s_elite <= params.s_population, "Elite size (" ~ to!string(params.s_elite) ~ ") larger than population size (" ~ to!string(params.s_population) ~ ")");
 		assert(params.s_eligible <= params.s_population, "Eligible parents list (" ~ to!string(params.s_eligible) ~ ") larger than population size (" ~ to!string(params.s_population) ~ ")");
 	} body {
-		G[] temp;
+		foreach (i; 0 .. count) {
+			G[] temp;
 
-		if (s_eligible < s_population || s_elite > 0) { /* If nontrivial elite or excluded parents, sort population in descending fitness */
-			sort!"a>b"(population);
-			// TODO: implement random tie-breaking for elitism and parental exclusion
-		}
-
-		temp = selection(population[0 .. s_eligible], n_parents, rng); /* Select parents */
-
-		temp = reproduction(temp, n_children, rng); /* Produce children */
-
-		if (childrenReplaceable) {
-			/* If children replaceable, new population is elite plus nonreplaced of nonelite and children */
-			population = population[0 .. s_elite] ~ replacement(population[s_elite .. $] ~ temp, n_replace, rng);
-		} else {
-			/* If children not replaceable, new population is elite plus children plus nonreplaced nonelite */
-			population = population[0 .. s_elite] ~ temp ~ replacement(population[s_elite .. $], n_replace, rng);
-		}
-		s_population = population.length; /* In case reproduction and replacement are unbalanced */
-
-		static if (is(G : GeneN!G)) {
-			if (runPosttournament) {
-				population[0].tournament(population);
+			if (s_eligible < s_population || s_elite > 0) { /* If nontrivial elite or excluded parents, sort population in descending fitness */
+				sort!"a>b"(population);
+				// TODO: implement random tie-breaking for elitism and parental exclusion
 			}
+
+			temp = selection(population[0 .. s_eligible], n_parents, rng); /* Select parents */
+
+			temp = reproduction(temp, n_children, rng); /* Produce children */
+
+			if (childrenReplaceable) {
+				/* If children replaceable, new population is elite plus nonreplaced of nonelite and children */
+				population = population[0 .. s_elite] ~ replacement(population[s_elite .. $] ~ temp, n_replace, rng);
+			} else {
+				/* If children not replaceable, new population is elite plus children plus nonreplaced nonelite */
+				population = population[0 .. s_elite] ~ temp ~ replacement(population[s_elite .. $], n_replace, rng);
+			}
+			s_population = population.length; /* In case reproduction and replacement are unbalanced */
+
+			static if (is(G : GeneN!G)) {
+				if (runPosttournament) {
+					population[0].tournament(population);
+				}
+			}
+			generation++;
 		}
 	}
 }

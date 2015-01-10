@@ -485,6 +485,7 @@ private:
 				}
 			}
 			ret[sm2][om2]++; /* Add back the cycle-closing move pair */
+
 			real total = 0;
 			foreach (r1; ret) {
 				foreach (r2; r1) {
