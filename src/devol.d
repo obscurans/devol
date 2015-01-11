@@ -142,6 +142,12 @@ if (is(G : GeneL!G) ||
 		generation = 0;
 	}
 
+	/* Utility function, run generations until specified count */
+	void runGenerationUntil(uint count) {
+		enforce(count >= generation, "Current generation (" ~ to!string(generation) ~ ") already past runGenerationUntil (" ~ to!string(count) ~ ")");
+		runGeneration(count - generation);
+	}
+
 	/* Run one or more generations */
 	void runGeneration(uint count = 1)
 	in {
