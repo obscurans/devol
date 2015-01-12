@@ -432,10 +432,10 @@ private:
 		}
 
 		static if (minimize) {
-			sm = play_mininit();
+			sm = this.play_mininit();
 			om = other.play_mininit();
 		} else {
-			sm = play_init();
+			sm = this.play_init();
 			om = other.play_init();
 		}
 		mid = index(cur_state, other.cur_state, sm, om);
@@ -450,11 +450,11 @@ private:
 
 		while (1) {
 			static if (minimize) {
-				sm2 = play_minnext(om);
-				om2 = play_minnext(sm);
+				sm2 = this.play_minnext(om);
+				om2 = other.play_minnext(sm);
 			} else {
-				sm2 = play_next(om);
-				om2 = play_next(sm);
+				sm2 = this.play_next(om);
+				om2 = other.play_next(sm);
 			}
 			mid2 = index(cur_state, other.cur_state, sm2, om2);
 			if (mid2 in count) { /* The Markov chain has closed the cycle */
@@ -501,7 +501,7 @@ private:
 
 			if (cyctot > 0) { /* If alpha = 0 corner case, only the very first move matters */
 				const real factor = (1 - total * (1 - alpha)) / cyctot;
-				assert(factor >= 1);
+				assert(factor >= 1 - alpha);
 				foreach (m1; Moves) {
 					foreach (m2; Moves) {
 						/* The normalizing factor (for the complete geometric series) is 1-alpha.

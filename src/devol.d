@@ -104,7 +104,7 @@ if (is(G : GeneL!G) ||
 			bool runPosttournament	= true;
 		}
 		/* Selection operator, input: eligible parents; output: selected parents */
-		G[] function(G[], size_t, ref Random) selection		= &DefaultOperators!G.fitnessProportional!(false, true, `a`);
+		G[] function(G[], size_t, ref Random) selection		= &DefaultOperators!G.fitnessProportional!(false, false, `a`);
 		/* Reproduction operator, input: selected parents; output: children */
 		G[] function(G[], size_t, ref Random) reproduction	= &DefaultOperators!G.normalReproduction;
 		/* Replacement operator, input: replaceable genes; output: nonreplaced genes - careful, NOT the replaced genes */
