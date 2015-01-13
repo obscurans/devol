@@ -31,6 +31,7 @@ class DFT : GeneN!DFT {
 									    [ 5 /* D/opp.C -> T */, 1 /* D/opp.D -> P */ ] ]; /* Payoff matrix */
 		uint eval_rounds			= 150;	/* Number of rounds to simulate for fitness evaluation, set to zero or negative for infinite horizon */
 		real eval_alpha				= 1;	/* Geometric weighting parameter for fitness evaluation, set to one for unweighted */
+		uint eval_rounds_switchover	= 250;	/* Point at which loop-detection algorithm is faster than direct simulation (empirically optimize) */
 	}
 
 	struct State {
@@ -197,11 +198,11 @@ class DFT : GeneN!DFT {
 			foreach (r; ret) {
 				total += r;
 			}
-			assert(approxEqual(total, 1, 1e-10, 1e-10), "tournament!statistics returned vector summing to " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[])
+			assert(approxEqual(total, 1, 1e-15, 1e-15), "tournament!statistics returned vector summing to " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[])
 
 			foreach (m1; Moves) {
 				foreach (m2; Moves) {
-					assert(approxEqual(ret[m1 * movec + m2], ret[m2 * movec + m1], 1e-10, 1e-10), "tournament!statistics returned vector with entries (" ~ to!string(m1) ~ "," ~ to!string(m2) ~ ") and (" ~ to!string(m2) ~ "," ~ to!string(m1) ~ ") not equal when symmetry expected");
+					assert(approxEqual(ret[m1 * movec + m2], ret[m2 * movec + m1], 1e-15, 1e-15), "tournament!statistics returned vector with entries (" ~ to!string(m1) ~ "," ~ to!string(m2) ~ ") and (" ~ to!string(m2) ~ "," ~ to!string(m1) ~ ") not equal when symmetry expected");
 				}
 			}
 		}
@@ -218,19 +219,39 @@ class DFT : GeneN!DFT {
 
 		foreach (i; 0 .. input.length - 1) {
 			foreach (j; i + 1 .. input.length) { /* Symmetric game, so run upper triangle for round-robin */
-				if (eval_rounds > 0 && eval_rounds < 0xFFFF) { /* If evaluation rounds is set and not insane */
-					if (eval_alpha == 1) { /* If evaluation is unweighted */
-						match = input[i].simulate!false(input[j], eval_rounds); /* Dispatch the correct simulation function, could be made static */
+				/* Dispatch the correct simulation function, could be made static */
+				if (eval_alpha == 1) { /* If evaluation is unweighted */
+					if (eval_rounds == 0) { /* Infinite-horizon */
+						match = input[i].simulate_loop!(false,true)(input[j], 0);
+					} else if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
+						match = input[i].simulate_loop!(false,false)(input[j], eval_rounds);
 					} else {
-						match = input[i].simulate!true(input[j], eval_rounds, eval_alpha);
+						match = input[i].simulate!false(input[j], eval_rounds);
 					}
 				} else {
-					if (eval_alpha == 1) {
-						match = input[i].simulate_infinite!false(input[j]);
+					/* Number of rounds to cause the tail to drop below 10^-20, approximately machine epsilon on IEEE754 80-bit precision */
+					const uint rounds_limit = roundTo!uint(log(10) / log(eval_alpha) * -20);
+					if (eval_rounds == 0) {
+						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
+							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
+						} else {
+							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha);
+						}
+					} else if (eval_rounds > rounds_limit) { /* Cap the number of rounds used at limit */
+						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
+							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
+						} else {
+							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha); /* Infinite horizon is easier to handle */
+						}
 					} else {
-						match = input[i].simulate_infinite!true(input[j], eval_alpha);
+						if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
+							match = input[i].simulate_loop!(true,false)(input[j], eval_rounds, eval_alpha);
+						} else {
+							match = input[i].simulate!true(input[j], eval_rounds, eval_alpha);
+						}
 					}
 				}
+
 				foreach (m1; Moves) {
 					foreach (m2; Moves) {
 						results[i][m1][m2] += match[m1][m2]; /* Accumulate counts from this match for the automata */
@@ -251,7 +272,8 @@ class DFT : GeneN!DFT {
 					}
 				}
 			}
-			ret[] /= input.length * (input.length - 1); /* Normalize to input-population average: nC2 matches, then results are double counted per match */
+			/* Normalize to input-population average: nC2 matches, then results are double counted per match */
+			ret[] /= input.length * (input.length - 1);
 
 			return ret;
 		} else {
@@ -340,7 +362,7 @@ private:
 				total += d2;
 			}
 		}
-		assert(approxEqual(total, 1, 1e-10, 1e-10), "simulate returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
+		assert(approxEqual(total, 1, 1e-15, 1e-15), "simulate returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
 	} body {
 		static if (weighted) {
 			const real factor = (1 - alpha) / (1 - alpha ^^ rounds); /* Total weighting is sum(n=0..rounds-1)alpha^n = (1-alpha^n)/(1-alpha) */
@@ -374,7 +396,7 @@ private:
 		return ret;
 	}
 
-	/* Simulates the game and returns the infinite-horizon per-round averaged distribution over move-pairs (results).
+	/* Simulates the game and returns the (possibly infinite-horizon) per-round averaged distribution over move-pairs (results).
 	 *
 	 * Using the property that this is a deterministic finite Markov chain, the formulation can be massively simplified.
 	 * Run the cross-product chain until it reaches a cycle, then average over the cycle only.
@@ -382,11 +404,20 @@ private:
 	 *
 	 * Compile-time overload (if weighted): returns the geometric(alpha)-weighted infinite-horizon distribution over move-pairs (results).
  	 * Run the cross-product chain until it closes a cycle, then calculate the tail weighting over the cycle to complete.
+	 *
+	 * Can also be used for non-infinite horizon simulations, by weighting the loop correctly as many times to fill the number of rounds,
+	 * then adding back the possibly incomplete-cycle tail. While this gives effectively constant expected time (for the same machines)
+	 * regardless of horizon, there is extremely significant overhead for bookkeeping and this is not faster until several hundred rounds.
+	 * There is a parameter (eval_rounds_switchover) controlling when a finite-horizon simulation starts using this function.
 	 */
-	real[movec][movec] simulate_infinite(bool weighted = false, bool minimize = false)(DFT other, real alpha = 1)
+	real[movec][movec] simulate_loop(bool weighted = false, bool infinite = false, bool minimize = false)
+	(DFT other, uint rounds = 0, real alpha = 1)
 	in {
 		static if (weighted) {
-			assert(alpha >= 0 && alpha < 1, "For simulate_infinite!weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
+			assert(alpha >= 0 && alpha < 1, "For simulate_loop!weighted, alpha parameter (" ~ to!string(alpha) ~ ") must be in [0, 1)");
+		}
+		static if (!infinite) {
+			assert(rounds > 0, "For simulate_loop!(!infinite), rounds parameter (0) must be greater than 0");
 		}
 	} out(ret) {
 		real total = 0;
@@ -395,21 +426,20 @@ private:
 				total += d2;
 			}
 		}
-		assert(approxEqual(total, 1, 1e-10, 1e-10), "simulate_infinite returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
+		assert(approxEqual(total, 1, 1e-15, 1e-15), "simulate_loop returned " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[][])
 	} body {
 		struct Count { /* To force the associative array to behave properly */
-			static if (weighted) {
-				real[movec][movec] c;
-			} else {
-				uint[movec][movec] c;
-			}
+			real[movec][movec] c;
 		}
 
 		real[movec][movec] ret = 0;
-		Count[size_t] count;	/* (3)+2-dimensional array: Markov state = (state of 1 x state of 2 x last move of 1 x last move of 2)
+		Count[size_t] count;	/* (4)+2-dimensional array: Markov state = (state of 1 x state of 2 x last move of 1 x last move of 2)
 								 * -> aggregate (weighted) counts of move-pairs of the simulation up to this Markov state.
 								 * Associative array used as this is really sparse.
 								 * As a side bonus, inExpression is a test for past visit */
+		static if (!infinite) {
+			size_t[] history;	/* Hybridizing the associative array with a simple array of indices for fast indexing (and fast search) */
+		}
 		size_t mid, mid2;		/* Indices into the Markov chain */
 		Move sm, om, sm2, om2;
 		static if (weighted) {
@@ -426,25 +456,30 @@ private:
 			const size_t n1_states = states.length;
 			const size_t n2_states = other.states.length;
 		}
-		const size_t m_states = n1_states * n2_states * movec * movec; /* Implementation choice: Markov chain index linearized to avoid double indirection */
+		/* Implementation choice: Markov chain index linearized to avoid double indirection */
+		const size_t m_states = n1_states * n2_states * movec * movec;
 
 		size_t index(size_t q1, size_t q2, Move m1, Move m2) { /* Indexing function for state x state x move x move */
 			return ((q1 * n2_states + q2) * movec + m1) * movec + m2;
 		}
 
-		sm = this.play_init!minimize();
+		sm = this.play_init!minimize(); /* Pass on the minimize flag to play_init to simplify code */
 		om = other.play_init!minimize();
 		mid = index(cur_state, other.cur_state, sm, om);
 
 		count[mid] = Count();
-		static if (weighted) {
-			foreach (ref c; count[mid].c) {
-				c[] = 0; /* Initialize for real values */
-			}
+		foreach (ref c; count[mid].c) {
+			c[] = 0; /* Initialize for real values */
 		}
-		count[mid].c[sm][om] = 1; /* At this Markov state, the only move-pair ever played is sm-om */
+		count[mid].c[sm][om] = 1; /* At this Markov state, the only move-pair ever played is sm-om (if weighted, at alpha^0) */
+		static if (!infinite) {
+			history ~= mid; /* Append this Markov state to the past history list */
+		}
 
-		while (1) {
+		static if (infinite) {
+			uint[] history; /* Hacked in, unused declaration to allow line below to compile */
+		}
+		while (infinite || history.length < rounds) { /* Should be optimized away properly */
 			sm2 = this.play_next!minimize(om);
 			om2 = other.play_next!minimize(sm);
 			mid2 = index(cur_state, other.cur_state, sm2, om2);
@@ -459,65 +494,131 @@ private:
 			} else {
 				count[mid2].c[sm2][om2]++; /* And increment the currently played pair */
 			}
+			static if (!infinite) {
+				history ~= mid2; /* Append this state to the past history list */
+			}
 
 			sm = sm2;
 			om = om2;
 			mid = mid2;
 		}
 
+		/* If not infinite, the simulation could reach the rounds limit before cycling */
+		static if (!infinite) {
+			if (history.length == rounds) {
+				ret = count[mid2].c; /* Copy last (at rounds-limit) aggregate counts */
+
+				foreach (m; Moves) {
+					static if (weighted) {
+						/* Normalize total weighted counts, total weighting is sum(n=0..rounds-1)alpha^n = (1-alpha^n)/(1-alpha) */
+						ret[m][] *= (1 - alpha) / (1 - alpha ^^ rounds);
+					} else {
+						ret[m][] /= rounds; /* Normalize total counts */
+					}
+				}
+				return ret;
+			}
+		}
+
 		/* At this point mid is the last state in the cycle, which closes to mid2 */
-		static if (weighted) {
-			real[movec][movec] temp;
-			ret = count[mid2].c; /* Take the accumulated weighted moves before the cycle */
-			foreach (m1; Moves) {
-				foreach (m2; Moves) {
-					temp[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the weighted moves within the cycle only */
-				}
+		real[movec][movec] temp;
+		ret = count[mid2].c; /* Take the accumulated (possibly weighted) moves before the cycle in ret */
+		foreach (m1; Moves) {
+			foreach (m2; Moves) {
+				/* This subtraction counts the (weighted) moves within the cycle only */
+				temp[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2];
 			}
+		}
+		static if (weighted) { /* Add back the (weighted) cycle-closing move pair */
 			alphan *= alpha;
-			temp[sm2][om2] += alphan; /* Add back the weighted cycle-closing move pair */
+			temp[sm2][om2] += alphan;
+		} else {
+			temp[sm2][om2]++;
+		}
 
-			real cyctot = 0;
-			foreach (t1; temp) {
-				foreach (t2; t1) {
-					cyctot += t2; /* Calculate the total weight of one cycle */
-				}
+		real cyctot = 0;
+		foreach (t1; temp) {
+			foreach (t2; t1) {
+				cyctot += t2; /* Calculate the total weight of one cycle */
 			}
-			real total = 0;
-			foreach (r1; ret) {
-				foreach (r2; r1) {
-					total += r2; /* Calculate accumulated count before the cycle */
-				}
+		}
+		real total = 0;
+		foreach (r1; ret) {
+			foreach (r2; r1) {
+				total += r2; /* Calculate accumulated weight before the cycle */
 			}
+		}
 
-			if (cyctot > 0) { /* If alpha = 0 corner case, only the very first move matters */
-				const real factor = (1 - total * (1 - alpha)) / cyctot;
-				assert(factor >= 1 - alpha);
+		static if (weighted) {
+			static if (infinite) {
+				if (cyctot > 1e-20) { /* If alpha = 0 or cycle occurs too far ahead, the cycle has negligible weighting */
+					/* The total weight (for the complete geometric series) is 1/(1-alpha).
+					 * The remainder is the contribution to be made from the cycle, which is thus scaled up to complete the weight */
+					const real factor = (1 / (1 - alpha) - total) / cyctot;
+					assert(factor >= 1);
+					foreach (m1; Moves) {
+						foreach (m2; Moves) {
+							ret[m1][m2] += factor * temp[m1][m2];
+						}
+					}
+				}
+
+				foreach (ref r1; ret) {
+					r1[] *= 1 - alpha; /* Normalize counts */
+				}
+			} else {
+				uint cyclen = 1;
+				while (history[$ - cyclen] != mid2) { /* Walk back through the cycle to find its length */
+					cyclen++;
+				}
+				const size_t prefixlen = history.length - cyclen;
+
+				const size_t cyccount = (rounds - prefixlen) / cyclen; /* Number of complete cycles used */
+				const size_t endid = rounds - cyccount * cyclen; /* Where the last (possibly complete) cycle ends, one-indexed */
+				assert(endid >= prefixlen && endid <= history.length);
+
 				foreach (m1; Moves) {
 					foreach (m2; Moves) {
-						/* The normalizing factor (for the complete geometric series) is 1-alpha.
-						 * The remainder from 1 after normalization is the contribution to be made from the cycle.
-						 * The cycle counts are thus scaled up to complete the normalized counts */
-						ret[m1][m2] = (1 - alpha) * ret[m1][m2] + factor * temp[m1][m2];
+						/* Total weight consists of pre-cycle, cyccount copies of the cycle (finite geometric sum with ratio alpha^cyclen),
+						 * plus the tail after the last cycle, weighted down cyccount times cycle length */
+						if (endid > 0) {
+							ret[m1][m2] += (1 - (alpha ^^ cyclen) ^^ cyccount) / (1 - alpha ^^ cyclen) * temp[m1][m2] +
+							  (alpha ^^ cyclen) ^^ cyccount * (count[history[endid - 1]].c[m1][m2] - ret[m1][m2]);
+						}  else {
+							/* Corner case: cycle starts at very first move and ends right there (tail of cycle is null, so must be subtracted) */
+							ret[m1][m2] += (1 - (alpha ^^ cyclen) ^^ cyccount) / (1 - alpha ^^ cyclen) * temp[m1][m2] +
+							  (alpha ^^ cyclen) ^^ cyccount * -ret[m1][m2];
+						}
 					}
+				}
+
+				foreach (ref r1; ret) {
+					/* Normalize counts, total weighting is sum(n=0..rounds-1)alpha^n = (1-alpha^n)/(1-alpha) */
+					r1[] *= (1 - alpha) / (1 - alpha ^^ rounds);
 				}
 			}
 		} else {
-			foreach (m1; Moves) {
-				foreach (m2; Moves) {
-					ret[m1][m2] = count[mid].c[m1][m2] - count[mid2].c[m1][m2]; /* This subtraction counts the aggregate moves within the cycle only */
+			static if (infinite) { /* If infinite horizon, unweighted, simply average over the cycle itself */
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						ret[m1][m2] = temp[m1][m2] / cyctot;
+					}
 				}
-			}
-			ret[sm2][om2]++; /* Add back the cycle-closing move pair */
+			} else {
+				const size_t cyccount = (rounds - to!uint(total)) / roundTo!uint(cyctot); /* Number of complete cycles used */
+				const size_t endid = rounds - cyccount * roundTo!uint(cyctot); /* Where the last (possibly complete) cycle ends, one-indexed */
+				assert(endid >= total && endid <= history.length);
 
-			real total = 0;
-			foreach (r1; ret) {
-				foreach (r2; r1) {
-					total += r2;
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						/* The total count of moves is (from start to end of last (complete) cycle) + #complete cycles * per-cycle move-count */
+						if (endid > 0) {
+							ret[m1][m2] = (count[history[endid - 1]].c[m1][m2] + cyccount * temp[m1][m2]) / rounds;
+						} else { /* Corner case: cycle starts at very first move and ends right there (tail of cycle is null and ignored) */
+							ret[m1][m2] = cyccount * temp[m1][m2] / rounds;
+						}
+					}
 				}
-			}
-			foreach (ref r1; ret) {
-				r1[] /= total; /* Normalize total counts */
 			}
 		}
 
