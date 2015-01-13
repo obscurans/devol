@@ -291,36 +291,37 @@ class DFT : GeneN!DFT {
 	}
 
 private:
-	/* Make the initial move and transition */
-	Move play_init() {
-		cur_state = init_state;
-		return init_act;
-	}
-
-	/* Make the next move and transition */
-	Move play_next(Move input) {
-		size_t cur = cur_state;
-		cur_state = states[cur].trans[input];
-		return states[cur].act[input];
-	}
-
-	/* Make the initial move and transition, using minimized representation */
-	Move play_mininit()
+	/* Make the initial move and transition, with compile-time switch to use minimized representation */
+	Move play_init(bool minimize = false)()
 	in {
-		assert(!modified_m, "Minimized automaton out of sync");
+		static if (minimize) {
+			assert(!modified_m, "Minimized automaton out of sync");
+		}
 	} body {
+		static if (minimize) {
 		cur_state = 0;
 		return init_act;
+		} else {
+			cur_state = init_state;
+			return init_act;
+		}
 	}
 
-	/* Make the next move and transition, using minimized representation */
-	Move play_minnext(Move input)
+	/* Make the next move and transition, with compile-time switch to use minimized representation */
+	Move play_next(bool minimize = false)(Move input)
 	in {
-		assert(!modified_m, "Minimized automaton out of sync");
+		static if (minimize) {
+			assert(!modified_m, "Minimized automaton out of sync");
+		}
 	} body {
 		size_t cur = cur_state;
-		cur_state = st_minimal[cur].trans[input];
-		return st_minimal[cur].act[input];
+		static if (minimize) {
+			cur_state = st_minimal[cur].trans[input];
+			return st_minimal[cur].act[input];
+		} else {
+			cur_state = states[cur].trans[input];
+			return states[cur].act[input];
+		}
 	}
 
 	/* Direct simulation of the game, up to a specified number of rounds. Returns distribution over move-pairs (results).
@@ -431,13 +432,8 @@ private:
 			return ((q1 * n2_states + q2) * movec + m1) * movec + m2;
 		}
 
-		static if (minimize) {
-			sm = this.play_mininit();
-			om = other.play_mininit();
-		} else {
-			sm = this.play_init();
-			om = other.play_init();
-		}
+		sm = this.play_init!minimize();
+		om = other.play_init!minimize();
 		mid = index(cur_state, other.cur_state, sm, om);
 
 		count[mid] = Count();
@@ -449,13 +445,8 @@ private:
 		count[mid].c[sm][om] = 1; /* At this Markov state, the only move-pair ever played is sm-om */
 
 		while (1) {
-			static if (minimize) {
-				sm2 = this.play_minnext(om);
-				om2 = other.play_minnext(sm);
-			} else {
-				sm2 = this.play_next(om);
-				om2 = other.play_next(sm);
-			}
+			sm2 = this.play_next!minimize(om);
+			om2 = other.play_next!minimize(sm);
 			mid2 = index(cur_state, other.cur_state, sm2, om2);
 			if (mid2 in count) { /* The Markov chain has closed the cycle */
 				break;
