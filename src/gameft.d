@@ -2,11 +2,11 @@
 
 import std.algorithm, std.conv, std.math, std.stdio;
 import devol;
-/*extern (C) { //currently LAPACK not used
+extern (C) { //currently LAPACK not used
 	void dgesv_(const int *n, const int *nrhs, const double *a, const int *lda, int *ipiv, double *b, const int *ldb, int *info);
-}*/
+}
 
-class DFT : GeneN!DFT {
+class DFT {
 	enum Move {
 		C,	/* Cooperate */
 		D	/* Defect */
@@ -27,11 +27,6 @@ class DFT : GeneN!DFT {
 		bool mut_act_null			= true;	/* Whether mutating response can be null */
 		uint cross_count			= 1;	/* Number of independent 2-point crossovers per crossover operation */
 		bool cross_null				= true;	/* Whether crossover can be null */
-		real[movec][movec] score	= [ [ 3 /* C/opp.C -> R */, 0 /* C/opp.D -> S */ ],
-									    [ 5 /* D/opp.C -> T */, 1 /* D/opp.D -> P */ ] ]; /* Payoff matrix */
-		uint eval_rounds			= 150;	/* Number of rounds to simulate for fitness evaluation, set to zero or negative for infinite horizon */
-		real eval_alpha				= 1;	/* Geometric weighting parameter for fitness evaluation, set to one for unweighted */
-		uint eval_rounds_switchover	= 250;	/* Point at which loop-detection algorithm is faster than direct simulation (empirically optimize) */
 	}
 
 	struct State {
@@ -99,16 +94,12 @@ class DFT : GeneN!DFT {
 		}
 	}
 
-	override string toString() const {
-		return to!string(cachefit) ~ ":" ~ to!string(init_state) ~ "/" ~ to!string(init_act) ~ "-" ~ to!string(states);
-	}
-
-	override @property DFT dup() const {
+	@property DFT dup() const {
 		return new DFT(this);
 	}
 
 	/* One-point mutation, with repeats and probabilites controlled through parameters */
-	override void mutate(ref Random rng) {
+	void mutate(ref Random rng) {
 		cur_state = -1; /* Unset current state pointer */
 		modified_c = modified_m = true; /* Set modified flags */
 		foreach (i; 0 .. mut_count) {
@@ -156,7 +147,7 @@ class DFT : GeneN!DFT {
 	/* Two-point crossover, keeping entire states as atomic objects.
 	 * The initial "state" is considered a separate atomic object after all actual states.
 	 * Repeats and possible null controlled through parameters. */
-	override DFT[2] crossover(const DFT other, ref Random rng) const 
+	DFT[2] crossover(const DFT other, ref Random rng) const
 	in {
 		assert(this.states.length == other.states.length, "Crossover impossible when state counts of parent automata (" ~ to!string(this.states.length) ~ ", " ~ to!string(other.states.length) ~ ") do not match");
 	} body {
@@ -189,112 +180,6 @@ class DFT : GeneN!DFT {
 		return ret;
 	}
 
-	/* Round-robin tournament on the input.
-	 * Compile time option: if statistics, instead of the fitness vector over the input, returns input-population tournament average counts of move-pairs. */
-	static real[] tournament(bool statistics = false)(DFT[] input)
-	out(ret) {
-		static if (statistics) {
-			real total = 0;
-			foreach (r; ret) {
-				total += r;
-			}
-			assert(approxEqual(total, 1, 1e-15, 1e-15), "tournament!statistics returned vector summing to " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[])
-
-			foreach (m1; Moves) {
-				foreach (m2; Moves) {
-					assert(approxEqual(ret[m1 * movec + m2], ret[m2 * movec + m1], 1e-15, 1e-15), "tournament!statistics returned vector with entries (" ~ to!string(m1) ~ "," ~ to!string(m2) ~ ") and (" ~ to!string(m2) ~ "," ~ to!string(m1) ~ ") not equal when symmetry expected");
-				}
-			}
-		}
-	} body {
-		real[] ret;
-		real[movec][movec] match;
-		real[movec][movec][] results;
-		results.length = input.length;
-		foreach (ref r1; results) { /* Initialize results array */
-			foreach (ref r2; r1) {
-				r2[] = 0;
-			}
-		}
-
-		foreach (i; 0 .. input.length - 1) {
-			foreach (j; i + 1 .. input.length) { /* Symmetric game, so run upper triangle for round-robin */
-				/* Dispatch the correct simulation function, could be made static */
-				if (eval_alpha == 1) { /* If evaluation is unweighted */
-					if (eval_rounds == 0) { /* Infinite-horizon */
-						match = input[i].simulate_loop!(false,true)(input[j], 0);
-					} else if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
-						match = input[i].simulate_loop!(false,false)(input[j], eval_rounds);
-					} else {
-						match = input[i].simulate!false(input[j], eval_rounds);
-					}
-				} else {
-					/* Number of rounds to cause the tail to drop below 10^-20, approximately machine epsilon on IEEE754 80-bit precision */
-					const uint rounds_limit = roundTo!uint(log(10) / log(eval_alpha) * -20);
-					if (eval_rounds == 0) {
-						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
-							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
-						} else {
-							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha);
-						}
-					} else if (eval_rounds > rounds_limit) { /* Cap the number of rounds used at limit */
-						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
-							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
-						} else {
-							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha); /* Infinite horizon is easier to handle */
-						}
-					} else {
-						if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
-							match = input[i].simulate_loop!(true,false)(input[j], eval_rounds, eval_alpha);
-						} else {
-							match = input[i].simulate!true(input[j], eval_rounds, eval_alpha);
-						}
-					}
-				}
-
-				foreach (m1; Moves) {
-					foreach (m2; Moves) {
-						results[i][m1][m2] += match[m1][m2]; /* Accumulate counts from this match for the automata */
-						results[j][m2][m1] += match[m1][m2]; /* Counts for opponent have order of the moves reversed for result-type */
-					}
-				}
-			}
-		}
-
-		static if (statistics) {
-			ret.length = movec * movec; /* For signature compatibility, the move-pair matrix is flattened; it should be symmetric anyway */
-			ret[] = 0;
-
-			foreach (i; 0 .. input.length) {
-				foreach (m1; Moves) {
-					foreach (m2; Moves) {
-						ret[m1 * movec + m2] += results[i][m1][m2];
-					}
-				}
-			}
-			/* Normalize to input-population average: nC2 matches, then results are double counted per match */
-			ret[] /= input.length * (input.length - 1);
-
-			return ret;
-		} else {
-			ret.length = input.length;
-			ret[] = 0;
-
-			foreach (i; 0 .. input.length) {
-				foreach (m1; Moves) {
-					foreach (m2; Moves) {
-						ret[i] += results[i][m1][m2] * score[m1][m2]; /* Total score is dot product of result-type count and score matrix */
-					}
-				}
-			}
-			ret[] /= input.length - 1; /* Normalize to per-round, per-match scores */
-
-			foreach (i; 0 .. input.length) {
-				input[i].cachefit = ret[i]; /* Store fitness results for participating automata */
-			}
-			return ret;
-		}
-	}
 
 	/* Return read-only view of the canonicalized automaton */
 	@property const(State[]) states_canonical() {
@@ -312,6 +197,120 @@ class DFT : GeneN!DFT {
 		return st_minimal;
 	}
 
+	/* Computes the 8-channel fingerprint (CC,CD,DC,DD for opponent cooperates and defects) at a single point (y,z) with given alpha */
+	real[8] fp_point(real y, real z, real alpha)
+	in {
+		assert(movec == 2, "Fingerprinting only implemented for movec = 2 (current: " ~ to!string(movec) ~ ")");
+		assert(alpha >= 0 && alpha <= 1, "Invalid alpha parameter: " ~ to!string(alpha));
+	} body {
+		if (modified_m) { /* Fingerprinting uses minimized representation */
+			minimizeStates();
+		}
+
+		int info;
+		int[] ipiv;
+		const size_t nstates = st_minimal.length;
+		const int n4 = cast(int)nstates * 4;
+		immutable int nrhs = 2;
+		ipiv.length = n4;
+
+		double[] q;
+		q.length = n4 * 2;
+		q[] = 0;
+		q[init_act * 2] = 1 - alpha;
+		q[init_act * 2 + n4 + 1] = 1 - alpha;
+
+		double[] a;
+		a.length = n4 * n4;
+		a[] = 0;
+		foreach (i; 0 .. nstates) {
+			a[n4 * i * 4 + (st_minimal[i].trans[0] * 2 + st_minimal[i].act[0]) * 2] = -y * alpha;
+			a[n4 * i * 4 + (st_minimal[i].trans[0] * 2 + st_minimal[i].act[0]) * 2 + 1] = (y - 1) * alpha;
+			a[n4 * (i * 4 + 1) + (st_minimal[i].trans[1] * 2 + st_minimal[i].act[1]) * 2] = -y * alpha;
+			a[n4 * (i * 4 + 1) + (st_minimal[i].trans[1] * 2 + st_minimal[i].act[1]) * 2 + 1] = (y - 1) * alpha;
+			a[n4 * (i * 4 + 2) + (st_minimal[i].trans[0] * 2 + st_minimal[i].act[0]) * 2] = -z * alpha;
+			a[n4 * (i * 4 + 2) + (st_minimal[i].trans[0] * 2 + st_minimal[i].act[0]) * 2 + 1] = (z - 1) * alpha;
+			a[n4 * (i * 4 + 3) + (st_minimal[i].trans[1] * 2 + st_minimal[i].act[1]) * 2] = -z * alpha;
+			a[n4 * (i * 4 + 3) + (st_minimal[i].trans[1] * 2 + st_minimal[i].act[1]) * 2 + 1] = (z - 1) * alpha;
+		}
+		foreach (i; 0 .. n4) {
+			a[i * (n4 + 1)] += 1;
+		}
+
+		dgesv_(&n4, &nrhs, a.ptr, &n4, ipiv.ptr, q.ptr, &n4, &info);
+
+		real[8] ret = 0;
+		foreach (i; 0 .. 4) {
+			foreach (j; 0 .. nstates) {
+				ret[i] += q[i + j * 4];
+			}
+			foreach (j; nstates .. 2 * nstates) {
+				ret[i + 4] += q[i + j * 4];
+			}
+		}
+		return ret;
+	}
+
+	/* Computes the colour components of the fingerprint structure predictor (ALLD,ALLC,TFT,PSY,INIT) with the given alpha */
+	real[5] fp_component(real alpha)
+	in {
+		assert(movec == 2, "Fingerprinting only implemented for movec = 2 (current: " ~ to!string(movec) ~ ")");
+		assert(alpha >= 0 && alpha <= 1, "Invalid alpha parameter: " ~ to!string(alpha));
+	} body {
+		if (modified_m) { /* Fingerprinting uses minimized representation */
+			minimizeStates();
+		}
+
+		int info;
+		int[] ipiv;
+		const int nstates = cast(int)st_minimal.length;
+		immutable int nrhs = 1;
+		ipiv.length = nstates;
+
+		double[] q;
+		q.length = nstates;
+		q[] = 0;
+		q[0] = 1 - alpha;
+
+		double[] a;
+		a.length = nstates * nstates;
+		a[] = 0;
+		foreach (i; 0 .. nstates) {
+			a[nstates * i + st_minimal[i].trans[0]] = -0.5 * alpha;
+			a[nstates * i + st_minimal[i].trans[1]] -= 0.5 * alpha;
+		}
+		foreach (i; 0 .. nstates) {
+			a[i * (nstates + 1)] += 1;
+		}
+
+		dgesv_(&nstates, &nrhs, a.ptr, &nstates, ipiv.ptr, q.ptr, &nstates, &info);
+
+		real[5] ret = 0;
+		foreach (i; 0 .. nstates) {
+			if (st_minimal[i].act[0]) {
+				if (st_minimal[i].act[1]) {
+					ret[0] += q[i];
+				} else {
+					ret[3] += q[i];
+				}
+			} else {
+				if (st_minimal[i].act[1]) {
+					ret[2] += q[i];
+				} else {
+					ret[1] += q[i];
+				}
+			}
+		}
+		ret[] *= alpha;
+		if (init_act) {
+			ret[4] = alpha - 1;
+		} else {
+			ret[4] = 1 - alpha;
+		}
+
+		return ret;
+	}
+
 private:
 	/* Make the initial move and transition, with compile-time switch to use minimized representation */
 	Move play_init(bool minimize = false)()
@@ -321,8 +320,8 @@ private:
 		}
 	} body {
 		static if (minimize) {
-		cur_state = 0;
-		return init_act;
+			cur_state = 0;
+			return init_act;
 		} else {
 			cur_state = init_state;
 			return init_act;
@@ -787,6 +786,277 @@ private:
 		}
 
 		modified_m = false;
+	}
+}
+
+class DFTtourn : GeneN!DFTtourn {
+	DFT automaton;
+	alias automaton this;
+
+	alias DFT.Move Move;
+	alias DFT.Moves Moves;
+	alias DFT.movec movec;
+	static {
+		real[movec][movec] score	= [ [ 3 /* C/opp.C -> R */, 0 /* C/opp.D -> S */ ],
+									    [ 5 /* D/opp.C -> T */, 1 /* D/opp.D -> P */ ] ]; /* Payoff matrix */
+		uint eval_rounds			= 150;	/* Number of rounds to simulate for fitness evaluation, set to zero or negative for infinite horizon */
+		real eval_alpha				= 1;	/* Geometric weighting parameter for fitness evaluation, set to one for unweighted */
+		uint eval_rounds_switchover	= 250;	/* Point at which loop-detection algorithm is faster than direct simulation (empirically optimize) */
+	}
+
+	/* Restore default constructor */
+	this() {}
+
+	/* Direct aliasing copy constructor */
+	this(DFT automaton) {
+		this.automaton = automaton;
+	}
+
+	/* Copy constructor */
+	this(const DFTtourn other) {
+		automaton = new DFT(other.automaton);
+	}
+
+	/* Random initialization constructor */
+	this(ref Random rng) {
+		automaton = new DFT(rng);
+	}
+
+	override string toString() const {
+		return to!string(cachefit) ~ ":" ~ to!string(init_state) ~ "/" ~ to!string(init_act) ~ "-" ~ to!string(states);
+	}
+
+	override @property DFTtourn dup() const {
+		return new DFTtourn(this);
+	}
+
+	override void mutate(ref Random rng) {
+		automaton.mutate(rng);
+	}
+
+	override DFTtourn[2] crossover(const DFTtourn other, ref Random rng) const {
+		DFT[2] res = automaton.crossover(other.automaton, rng);
+		return [new DFTtourn(res[0]), new DFTtourn(res[1])];
+	}
+
+	/* Round-robin tournament on the input.
+	 * Compile time option: if statistics, instead of the fitness vector over the input, returns input-population tournament average counts of move-pairs. */
+	static real[] tournament(bool statistics = false)(DFTtourn[] input)
+	out(ret) {
+		static if (statistics) {
+			real total = 0;
+			foreach (r; ret) {
+				total += r;
+			}
+			assert(approxEqual(total, 1, 1e-15, 1e-15), "tournament!statistics returned vector summing to " ~ to!string(total) ~ " when 1 expected"); //TODO: find sum(real[])
+
+			foreach (m1; Moves) {
+				foreach (m2; Moves) {
+					assert(approxEqual(ret[m1 * movec + m2], ret[m2 * movec + m1], 1e-15, 1e-15), "tournament!statistics returned vector with entries (" ~ to!string(m1) ~ "," ~ to!string(m2) ~ ") and (" ~ to!string(m2) ~ "," ~ to!string(m1) ~ ") not equal when symmetry expected");
+				}
+			}
+		}
+	} body {
+		real[] ret;
+		real[movec][movec] match;
+		real[movec][movec][] results;
+		results.length = input.length;
+		foreach (ref r1; results) { /* Initialize results array */
+			foreach (ref r2; r1) {
+				r2[] = 0;
+			}
+		}
+
+		foreach (i; 0 .. input.length - 1) {
+			foreach (j; i + 1 .. input.length) { /* Symmetric game, so run upper triangle for round-robin */
+				/* Dispatch the correct simulation function, could be made static */
+				if (eval_alpha == 1) { /* If evaluation is unweighted */
+					if (eval_rounds == 0) { /* Infinite-horizon */
+						match = input[i].simulate_loop!(false,true)(input[j], 0);
+					} else if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
+						match = input[i].simulate_loop!(false,false)(input[j], eval_rounds);
+					} else {
+						match = input[i].simulate!false(input[j], eval_rounds);
+					}
+				} else {
+					/* Number of rounds to cause the tail to drop below 10^-20, approximately machine epsilon on IEEE754 80-bit precision */
+					const uint rounds_limit = roundTo!uint(log(10) / log(eval_alpha) * -20);
+					if (eval_rounds == 0) {
+						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
+							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
+						} else {
+							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha);
+						}
+					} else if (eval_rounds > rounds_limit) { /* Cap the number of rounds used at limit */
+						if (rounds_limit < eval_rounds_switchover) { /* Easier to directly simulate until tail arithmetically negligible */
+							match = input[i].simulate!true(input[j], rounds_limit, eval_alpha);
+						} else {
+							match = input[i].simulate_loop!(true,true)(input[j], 0, eval_alpha); /* Infinite horizon is easier to handle */
+						}
+					} else {
+						if (eval_rounds >= eval_rounds_switchover) { /* Too many rounds, use loop-detection algorithm */
+							match = input[i].simulate_loop!(true,false)(input[j], eval_rounds, eval_alpha);
+						} else {
+							match = input[i].simulate!true(input[j], eval_rounds, eval_alpha);
+						}
+					}
+				}
+
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						results[i][m1][m2] += match[m1][m2]; /* Accumulate counts from this match for the automata */
+						results[j][m2][m1] += match[m1][m2]; /* Counts for opponent have order of the moves reversed for result-type */
+					}
+				}
+			}
+		}
+
+		static if (statistics) {
+			ret.length = movec * movec; /* For signature compatibility, the move-pair matrix is flattened; it should be symmetric anyway */
+			ret[] = 0;
+
+			foreach (i; 0 .. input.length) {
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						ret[m1 * movec + m2] += results[i][m1][m2];
+					}
+				}
+			}
+			/* Normalize to input-population average: nC2 matches, then results are double counted per match */
+			ret[] /= input.length * (input.length - 1);
+
+			return ret;
+		} else {
+			ret.length = input.length;
+			ret[] = 0;
+
+			foreach (i; 0 .. input.length) {
+				foreach (m1; Moves) {
+					foreach (m2; Moves) {
+						ret[i] += results[i][m1][m2] * score[m1][m2]; /* Total score is dot product of result-type count and score matrix */
+					}
+				}
+			}
+			ret[] /= input.length - 1; /* Normalize to per-round, per-match scores */
+
+			foreach (i; 0 .. input.length) {
+				input[i].cachefit = ret[i]; /* Store fitness results for participating automata */
+			}
+			return ret;
+		}
+	}
+}
+
+class DFTmatch : GeneL!DFTmatch {
+	DFT automaton;
+	alias automaton this;
+
+	alias DFT.Move Move;
+	alias DFT.Moves Moves;
+	alias DFT.movec movec;
+	static {
+		real alpha					= 0.8;	/* Fingerprint evaluation alpha geometric parameter */
+		int target_subdiv_depth		= 2;	/* 4 ^^ depth subsquares (4 ^^ (depth + 1) points) in the target profile */
+		real[8][] target_profile;			/* Target profile (fingerprint */
+	}
+
+	/* Restore default constructor */
+	this() {}
+
+	/* Direct aliasing copy constructor */
+	this(DFT automaton) {
+		this.automaton = automaton;
+	}
+
+	/* Copy constructor */
+	this(const DFTmatch other) {
+		automaton = new DFT(other.automaton);
+	}
+
+	/* Random initialization constructor */
+	this(ref Random rng) {
+		automaton = new DFT(rng);
+	}
+
+	override string toString() const {
+		return to!string(cachefit) ~ ":" ~ to!string(init_state) ~ "/" ~ to!string(init_act) ~ "-" ~ to!string(states);
+	}
+
+	override @property DFTmatch dup() const {
+		return new DFTmatch(this);
+	}
+
+	override void mutate(ref Random rng) {
+		automaton.mutate(rng);
+	}
+
+	override DFTmatch[2] crossover(const DFTmatch other, ref Random rng) const {
+		DFT[2] res = automaton.crossover(other.automaton, rng);
+		return [new DFTmatch(res[0]), new DFTmatch(res[1])];
+	}
+
+	static setTarget(DFT target) {
+		target_profile.length = 4 << (target_subdiv_depth * 2);
+
+		void target_set(real y, real y2, real z, real z2, size_t offset, int depth) {
+			immutable real cp = 1 + sqrt(1.0 / 3);
+			immutable real cn = 1 - sqrt(1.0 / 3);
+			if (depth) {
+				target_set(y, (y + y2) / 2, z, (z + z2) / 2, offset, depth - 1);
+				target_set((y + y2) / 2, y2, z, (z + z2) / 2, offset + (1 << (depth * 2)), depth - 1);
+				target_set(y, (y + y2) / 2, (z + z2) / 2, z2, offset + (2 << (depth * 2)), depth - 1);
+				target_set((y + y2) / 2, y2, (z + z2) / 2, z2, offset + (3 << (depth * 2)), depth - 1);
+				return;
+			}
+			target_profile[offset] = target.fp_point((y * cn + y2 * cp) / 2, (z * cn + z2 * cp) / 2, alpha);
+			target_profile[offset + 1] = target.fp_point((y * cp + y2 * cn) / 2, (z * cn + z2 * cp) / 2, alpha);
+			target_profile[offset + 2] = target.fp_point((y * cn + y2 * cp) / 2, (z * cp + z2 * cn) / 2, alpha);
+			target_profile[offset + 3] = target.fp_point((y * cp + y2 * cn) / 2, (z * cp + z2 * cn) / 2, alpha);
+		}
+
+		target_set(0, 1, 0, 1, 0, target_subdiv_depth);
+	}
+
+	override real evaluate()
+	in {
+		assert(target_profile.length == 4 << target_subdiv_depth, "Inconsistent target_profile length: " ~ to!string(target_profile.length) ~ ", " ~ to!string(4 << (target_subdiv_depth * 2)) ~ " required for target_subdiv_depth " ~ to!string(target_subdiv_depth));
+	} body {
+		/* Single-point fingerprint distance between this automaton and target profile, unscaled for speed */
+		real fp_diffpt(real y, real z, const real[8] target) {
+			real[8] x = automaton.fp_point(y, z, alpha);
+			x[] -= target[];
+			foreach (i; 0 .. 4) {
+				if ((x[i] < 0) ^ (x[i + 4] < 0)) {
+					x[i] = fabs((x[i] * x[i] + x[i + 4] * x[i + 4]) / (x[i] - x[i + 4]));
+				} else {
+					x[i] = fabs(x[i] + x[i + 4]);
+				}
+			}
+			return (x[0] + x[1]) + (x[2] + x[3]);
+		}
+
+		/* Fingerprint integration by recursive divide-and-conquer with 3rd order product Gauss cubature, unscaled for speed
+		 * Uses fixed, precomputed target_profile for second fingerprint */
+		real fp_integrate(real y, real y2, real z, real z2, const real[8][] target_slice, int depth)
+		in {
+			assert(target_slice.length == 4 << (depth * 2));
+		} body {
+			immutable real cp = 1 + sqrt(1.0 / 3);
+			immutable real cn = 1 - sqrt(1.0 / 3);
+			if (depth) {
+				const size_t sl = target_slice.length / 4;
+				return (fp_integrate(y, (y + y2) / 2, z, (z + z2) / 2, target_slice[0 .. sl], depth - 1) +
+				  fp_integrate((y + y2) / 2, y2, z, (z + z2) / 2, target_slice[sl .. sl * 2], depth - 1)) +
+				  (fp_integrate(y, (y + y2) / 2, (z + z2) / 2, z2, target_slice[sl * 2 .. sl * 3], depth - 1) +
+				  fp_integrate((y + y2) / 2, y2, (z + z2) / 2, z2, target_slice[sl * 3 .. $], depth - 1));
+			}
+			return (fp_diffpt((y * cn + y2 * cp) / 2, (z * cn + z2 * cp) / 2, target_slice[0]) +
+			  fp_diffpt((y * cp + y2 * cn) / 2, (z * cn + z2 * cp) / 2, target_slice[1])) +
+			  (fp_diffpt((y * cn + y2 * cp) / 2, (z * cp + z2 * cn) / 2, target_slice[2]) +
+			  fp_diffpt((y * cp + y2 * cn) / 2, (z * cp + z2 * cn) / 2, target_slice[3]));
+		}
+
+		return ldexp(fp_integrate(0, 1, 0, 1, target_profile, target_subdiv_depth), -2 * target_subdiv_depth - 4);
 	}
 }
 

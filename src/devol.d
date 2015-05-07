@@ -98,6 +98,7 @@ if (is(G : GeneL!G) ||
 		size_t n_replace			= 12;		/* Number of genes in the old population to be replaced:
 												 * careful, if childrenReplaceable, then include those in the count */
 		bool childrenReplaceable	= false;	/* Whether the newly created children are included in the removable genes at replacement */
+		bool invertFitnessSense		= false;	/* Whether lower fitness values are better than higher */
 		static if (is(G : GeneN!G)) {
 			/* For nonlocal-fitness representations, whether to run a full-population tournament at the end of the generation.
 			 * Set false for actual tournament-based selection (and implement in the selection function). */
@@ -159,7 +160,11 @@ if (is(G : GeneL!G) ||
 			G[] temp;
 
 			if (s_eligible < s_population || s_elite > 0) { /* If nontrivial elite or excluded parents, sort population in descending fitness */
-				sort!"a>b"(population);
+				if (invertFitnessSense) {
+					sort(population);
+				} else {
+					sort!"a>b"(population);
+				}
 				// TODO: implement random tie-breaking for elitism and parental exclusion
 			}
 
